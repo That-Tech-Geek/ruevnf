@@ -332,7 +332,7 @@ def calculate_stock_score(data):
         management_score * 0.10 +
         moat_score * 0.10 +
         risk_score * 0.10
-    ) * 100 # Scale to 0-100
+    )
 
     # Determine recommendation
     if total_score > 75:
@@ -733,22 +733,7 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-st.warning("⚠️ **Important Limitations & Manual Input Required:**")
-st.markdown("""
--   **API Keys:** For full functionality, you need to obtain free API keys from:
-    * **Financial Modeling Prep (FMP)**: For Analyst Recommendations, Insider Trading, and (hypothetical) Industry PE.
-    * **EOD Historical Data (EODHD)**: For News Sentiment.
-    * **Remember to replace the `FMP_API_KEY` and `EODHD_API_KEY` placeholders in the Python code with your actual keys.**
--   **Qualitative Parameters (Defaulted):** Due to limitations of free APIs, the following parameters are **not** fetched and are set to **neutral/average defaults**. They represent subjective assessments and often require specialized (often paid) data sources or manual analysis:
-    * **Management Quality:** Governance Rating, Promoter Holding Trend
-    * **Moat & Competitiveness:** Brand Value / Moat, Market Share Leadership
-    * **Risk Factors (Non-Beta):** Litigation/Political Risk
--   **P/E Ratio vs Industry:** While we try to infer this from `yfinance`'s current P/E, a true "vs Industry Avg" comparison often requires a dedicated industry average data point from a more advanced API, or manual research.
--   **Data Availability:** Data from `yfinance` and other APIs can be inconsistent or incomplete for some tickers. If data is missing for a parameter, its default value will be used, and a warning will be displayed.
-""")
-
-
-ticker_symbol = st.text_input("Enter Stock Ticker (e.g., AAPL, MSFT, GOOG, TSLA)", value="AAPL").upper()
+ticker_symbol = st.text_input("Enter Stock Ticker").upper()
 calculate_button = st.button("Calculate Stock Score")
 
 # --- Display Results ---
