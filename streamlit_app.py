@@ -626,25 +626,25 @@ def fetch_and_process_stock_data(ticker_symbol):
 
     # Define alternative keys for robust data fetching from yfinance
     YFINANCE_KEYS = {
-        'Total Revenue': ['Total Revenue', 'Revenue', 'totalRevenue'],
-        'Basic EPS': ['Basic EPS', 'Diluted EPS', 'basicEPS', 'dilutedEPS'],
-        'Operating Income': ['Operating Income', 'OperatingProfit', 'operatingIncome'],
+        'Total Revenue': ['Total Revenue', 'Revenue', 'totalRevenue', 'Operating Revenue'],
+        'Basic EPS': ['Basic EPS', 'Diluted EPS', 'basicEPS', 'dilutedEPS', 'Earnings Per Share'],
+        'Operating Income': ['Operating Income', 'OperatingProfit', 'operatingIncome', 'Operating Expenses'],
         'Gross Profit': ['Gross Profit', 'grossProfit'],
-        'Interest Expense': ['Interest Expense', 'interestExpense', 'Interest Income Expense'],
-        'Net Income': ['Net Income', 'netIncome', 'NetIncome'],
-        'Total Stockholder Equity': ['Total Stockholder Equity', 'StockholdersEquity', 'totalStockholderEquity', 'Total Equity'],
-        'Total Debt': ['Total Debt', 'LongTermDebt', 'totalDebt']
+        'Interest Expense': ['Interest Expense', 'interestExpense', 'Interest Income Expense', 'Interest And Debt Expense'],
+        'Net Income': ['Net Income', 'netIncome', 'NetIncome', 'Net Income Common Stockholders'],
+        'Total Stockholder Equity': ['Total Stockholder Equity', 'StockholdersEquity', 'totalStockholderEquity', 'Total Equity', 'equity'],
+        'Total Debt': ['Total Debt', 'Long Term Debt', 'longTermDebt', 'Short Term Debt', 'shortTermDebt', 'Current Debt', 'currentDebt', 'Total Liabilities Net Minority Interest']
     }
 
-    def get_yfinance_value(dataframe, keys, date_col=None):
+    def get_yfinance_series(dataframe, keys):
+        """
+        Retrieves a Series (row) from the dataframe for the given keys.
+        Assumes dataframe columns are date-indexed for financial statements.
+        Returns the Series if found, otherwise None.
+        """
         for key in keys:
             if key in dataframe.index:
-                if date_col:
-                    if date_col in dataframe.columns:
-                        return dataframe.loc[key, date_col]
-                else:
-                    # Return the series if no specific date column is requested
-                    return dataframe.loc[key]
+                return dataframe.loc[key]
         return None
 
 
@@ -680,47 +680,62 @@ def fetch_and_process_stock_data(ticker_symbol):
                 annual_financials = annual_financials.sort_index(axis=1, ascending=False) # Sort by date descending for latest
 
                 # Fetch and process Revenue Growth
-                revenue = get_yfinance_value(annual_financials, YFINANCE_KEYS['Total Revenue'])
-                if revenue is not None and len(revenue) >= 4: # Needs 4 years for 3Y CAGR
-                    data['revenue_growth'] = calculate_cagr(revenue.iloc[:4].sort_index(ascending=True)) # Use latest 4, then sort for CAGR
+                revenue_series = get_yfinance_series(annual_financials, YFINANCE_KEYS['Total Revenue'])
+                if revenue_series is not None and len(revenue_series) >= 4: # Needs 4 years for 3Y CAGR
+                    data['revenue_growth'] = calculate_cagr(revenue_series.iloc[:4].sort_index(ascending=True)) # Use latest 4, then sort for CAGR
                 else: errors.append("Insufficient 'Total Revenue' data from yfinance for 3Y CAGR.")
 
-                # Fetch and process EPS growth
-                annual_earnings = stock.earnings
-                if annual_earnings is None or annual_earnings.empty:
-                    errors.append("Could not fetch annual earnings from yfinance or it's empty.")
-                else:
-                    annual_earnings.columns = pd.to_datetime(annual_earnings.columns)
-                    annual_earnings = annual_earnings.sort_index(axis=1, ascending=False) # Sort by date descending for latest
-                    eps = get_yfinance_value(annual_earnings, YFINANCE_KEYS['Basic EPS'])
-                    if eps is not None and len(eps) >= 4:
-                        data['eps_growth'] = calculate_cagr(eps.iloc[:4].sort_index(ascending=True))
-                    else: errors.append("Insufficient 'Basic EPS' data from yfinance for 3Y CAGR.")
-
                 # Operating Margin
-                op_income = get_yfinance_value(annual_financials, YFINANCE_KEYS['Operating Income'], annual_financials.columns[0])
-                if op_income is None: # Fallback to Gross Profit if Operating Income not found
-                    op_income = get_yfinance_value(annual_financials, YFINANCE_KEYS['Gross Profit'], annual_financials.columns[0])
-                    
-                total_revenue_latest = get_yfinance_value(annual_financials, YFINANCE_KEYS['Total Revenue'], annual_financials.columns[0])
+                op_income_series = get_yfinance_series(annual_financials, YFINANCE_KEYS['Operating Income'])
+                gross_profit_series = get_yfinance_series(annual_financials, YFINANCE_KEYS['Gross Profit'])
+                
+                # Prioritize Operating Income, fallback to Gross Profit
+                op_val = None
+                if op_income_series is not None and not op_income_series.empty:
+                    op_val = op_income_series.iloc[0] # Get latest value
+                elif gross_profit_series is not None and not gross_profit_series.empty:
+                    op_val = gross_profit_series.iloc[0] # Get latest value
 
-                if pd.notna(op_income) and pd.notna(total_revenue_latest) and total_revenue_latest != 0: 
-                    data['operating_margin'] = op_income / total_revenue_latest
+                total_revenue_val = None
+                if revenue_series is not None and not revenue_series.empty:
+                    total_revenue_val = revenue_series.iloc[0] # Get latest value
+
+                if pd.notna(op_val) and pd.notna(total_revenue_val) and total_revenue_val != 0: 
+                    data['operating_margin'] = op_val / total_revenue_val
                 else: errors.append("Missing operating income/gross profit or total revenue for Operating Margin (yfinance).")
 
-
                 # Interest Coverage Ratio
-                operating_income_latest = get_yfinance_value(annual_financials, YFINANCE_KEYS['Operating Income'], annual_financials.columns[0])
-                interest_expense_latest = get_yfinance_value(annual_financials, YFINANCE_KEYS['Interest Expense'], annual_financials.columns[0])
+                operating_income_for_icr = op_val # Use the same operating income fetched above
+                interest_expense_series = get_yfinance_series(annual_financials, YFINANCE_KEYS['Interest Expense'])
+                interest_expense_val = interest_expense_series.iloc[0] if interest_expense_series is not None and not interest_expense_series.empty else None
 
-                if pd.notna(operating_income_latest) and pd.notna(interest_expense_latest):
-                    if interest_expense_latest != 0: data['interest_coverage_ratio'] = operating_income_latest / interest_expense_latest
+                if pd.notna(operating_income_for_icr) and pd.notna(interest_expense_val):
+                    if interest_expense_val != 0: data['interest_coverage_ratio'] = operating_income_for_icr / interest_expense_val
                     else: data['interest_coverage_ratio'] = 1000.0 # Very high if no interest expense
                 else: errors.append("Missing operating income/interest expense for Interest Coverage Ratio (yfinance).")
 
         else:
             errors.append("Basic info not fetched, or financial currency missing, so financials cannot be fetched accurately from yfinance.")
 
+    except Exception as e:
+        errors.append(f"An error occurred while processing yfinance financials for {ticker_symbol}: {e}. Defaults used.")
+
+    try:
+        # Fetch and process EPS growth
+        annual_earnings = stock.earnings
+        if annual_earnings is None or annual_earnings.empty:
+            errors.append("Could not fetch annual earnings from yfinance or it's empty.")
+        else:
+            annual_earnings.columns = pd.to_datetime(annual_earnings.columns)
+            annual_earnings = annual_earnings.sort_index(axis=1, ascending=False) # Sort by date descending for latest
+            eps_series = get_yfinance_series(annual_earnings, YFINANCE_KEYS['Basic EPS'])
+            if eps_series is not None and len(eps_series) >= 4:
+                data['eps_growth'] = calculate_cagr(eps_series.iloc[:4].sort_index(ascending=True))
+            else: errors.append("Insufficient 'Basic EPS' data from yfinance for 3Y CAGR.")
+    except Exception as e:
+        errors.append(f"An error occurred while processing yfinance earnings for {ticker_symbol}: {e}. Defaults used.")
+
+    try:
         annual_balance_sheet = stock.balance_sheet # This might also return None
         if annual_balance_sheet is None or annual_balance_sheet.empty:
             errors.append("Could not fetch balance sheet from yfinance or it's empty.")
@@ -729,31 +744,42 @@ def fetch_and_process_stock_data(ticker_symbol):
             annual_balance_sheet = annual_balance_sheet.sort_index(axis=1, ascending=False) # Sort by date descending for latest
 
             # ROE
-            net_income_latest = get_yfinance_value(annual_financials, YFINANCE_KEYS['Net Income'], annual_financials.columns[0])
-            total_equity_latest = get_yfinance_value(annual_balance_sheet, YFINANCE_KEYS['Total Stockholder Equity'], annual_balance_sheet.columns[0])
-            if pd.notna(net_income_latest) and pd.notna(total_equity_latest) and total_equity_latest != 0: 
-                data['roe'] = net_income_latest / total_equity_latest
+            net_income_series = get_yfinance_series(annual_financials, YFINANCE_KEYS['Net Income'])
+            total_equity_series = get_yfinance_series(annual_balance_sheet, YFINANCE_KEYS['Total Stockholder Equity'])
+
+            net_income_val = net_income_series.iloc[0] if net_income_series is not None and not net_income_series.empty else None
+            total_equity_val = total_equity_series.iloc[0] if total_equity_series is not None and not total_equity_series.empty else None
+
+            if pd.notna(net_income_val) and pd.notna(total_equity_val) and total_equity_val != 0: 
+                data['roe'] = net_income_val / total_equity_val
             else: errors.append("Missing Net Income/Total Stockholder Equity for ROE (yfinance).")
 
             # Debt/Equity
-            total_debt_latest = get_yfinance_value(annual_balance_sheet, YFINANCE_KEYS['Total Debt'], annual_balance_sheet.columns[0])
-            if total_debt_latest is None: # yfinance sometimes uses different names for debt
-                total_debt_latest = get_yfinance_value(annual_balance_sheet, ['Long Term Debt', 'Current Debt'], annual_balance_sheet.columns[0])
-                if total_debt_latest is not None:
-                     # If only one is found, use that. If both, sum them.
-                    current_debt = get_yfinance_value(annual_balance_sheet, ['Current Debt'], annual_balance_sheet.columns[0])
-                    long_term_debt = get_yfinance_value(annual_balance_sheet, ['Long Term Debt'], annual_balance_sheet.columns[0])
-                    total_debt_latest = (current_debt if pd.notna(current_debt) else 0) + (long_term_debt if pd.notna(long_term_debt) else 0)
+            total_debt_series = get_yfinance_series(annual_balance_sheet, YFINANCE_KEYS['Total Debt'])
+            
+            total_debt_val = None
+            if total_debt_series is not None and not total_debt_series.empty:
+                total_debt_val = total_debt_series.iloc[0]
+            else: # If primary debt keys fail, try to sum up current and long term debt
+                current_debt_series = get_yfinance_series(annual_balance_sheet, ['Current Debt', 'Short Term Debt'])
+                long_term_debt_series = get_yfinance_series(annual_balance_sheet, ['Long Term Debt', 'longTermDebt'])
+                
+                current_debt_val = current_debt_series.iloc[0] if current_debt_series is not None and not current_debt_series.empty else 0
+                long_term_debt_val = long_term_debt_series.iloc[0] if long_term_debt_series is not None and not long_term_debt_series.empty else 0
+                
+                # Only sum if at least one is found, otherwise it's still missing
+                if current_debt_val != 0 or long_term_debt_val != 0:
+                    total_debt_val = current_debt_val + long_term_debt_val
                 else:
-                    total_debt_latest = 0 # Default to 0 if no debt key found
+                    total_debt_val = 0 # Default to 0 if no debt component found either
 
 
-            if pd.notna(total_debt_latest) and pd.notna(total_equity_latest) and total_equity_latest != 0: 
-                data['debt_equity'] = total_debt_latest / total_equity_latest
+            if pd.notna(total_debt_val) and pd.notna(total_equity_val) and total_equity_val != 0: 
+                data['debt_equity'] = total_debt_val / total_equity_val
             else: errors.append("Missing Total Debt/Total Stockholder Equity for Debt/Equity (yfinance).")
         
     except Exception as e:
-        errors.append(f"An error occurred while processing yfinance financials/balance sheet for {ticker_symbol}: {e}. Defaults used.")
+        errors.append(f"An error occurred while processing yfinance balance sheet for {ticker_symbol}: {e}. Defaults used.")
 
     try:
         hist = stock.history(period="1y", interval="1d")
