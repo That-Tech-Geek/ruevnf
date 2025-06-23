@@ -4,7 +4,7 @@ import pandas as pd
 import numpy as np
 import requests # For making HTTP requests to other APIs
 
-FMP_API_KEY = st.secrets("FMP-API-KEY") # Get from https://financialmodelingprep.com/developer/docs/
+FMP_API_KEY = st.secrets["FMP-API-KEY"]
 
 # --- Scoring Logic Functions (copied from previous response) ---
 
