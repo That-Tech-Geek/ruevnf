@@ -724,15 +724,6 @@ st.set_page_config(layout="centered", page_title="Stock Scoring Model (Auto-Fetc
 st.title("📈 Stock Scoring Model (Auto-Fetch)")
 st.markdown("Enter a stock ticker symbol, and the model will automatically fetch relevant data from Yahoo Finance and other sources to score the stock.")
 
-st.markdown("""
-<div style="padding: 10px; border-radius: 5px; background-color: #f0f2f6; margin-bottom: 20px;">
-    <strong>Interpretation:</strong><br>
-    Score > 75: <span style="color: green; font-weight: bold;">✅ BUY</span><br>
-    Score 50–75: <span style="color: orange; font-weight: bold;">🟡 HOLD</span><br>
-    Score < 50: <span style="color: red; font-weight: bold;">❌ SELL</span>
-</div>
-""", unsafe_allow_html=True)
-
 ticker_symbol = st.text_input("Enter Stock Ticker").upper()
 calculate_button = st.button("Calculate Stock Score")
 
