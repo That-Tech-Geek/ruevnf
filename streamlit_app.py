@@ -3,6 +3,7 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 import requests # For making HTTP requests to other APIs
+import time # For potential rate limiting pauses, though st.cache_data is primary
 
 # --- API Keys (Accessed via st.secrets) ---
 # Ensure you have .streamlit/secrets.toml configured with your API keys:
@@ -10,11 +11,11 @@ import requests # For making HTTP requests to other APIs
 # EODHD-API-KEY = "your_actual_eodhd_api_key_here"
 
 # Accessing secrets using square bracket notation
-FMP_API_KEY = st.secrets["FMP-API-KEY"] if "FMP-API-KEY" in st.secrets else ""
-EODHD_API_KEY = st.secrets["EODHD-API-KEY"] if "EODHD-API-KEY" in st.secrets else ""
+FMP_API_KEY = st.secrets.get("FMP-API-KEY", "")
+EODHD_API_KEY = st.secrets.get("EODHD-API-KEY", "")
 
 
-# --- Scoring Logic Functions (copied from previous response) ---
+# --- Scoring Logic Functions (copied from previous response - assumed correct) ---
 
 def score_revenue_growth(growth):
     """Scores Revenue Growth (3Y CAGR) on a 0-10 scale."""
@@ -221,11 +222,13 @@ def score_market_share(share):
 
 def score_beta(beta):
     """Scores Beta (Volatility) on a 0-10 scale."""
+    if beta is None: # Handle cases where beta might be None from yfinance
+        return 5 # Default to neutral if no beta available
     if beta < 1:
         return 10
     elif beta == 1:
         return 5
-    else: # beta > 1.5
+    else: # beta > 1.5, or > 1 but not 1.5
         return 2
 
 def score_litigation_risk(risk):
@@ -237,7 +240,7 @@ def score_litigation_risk(risk):
     else: # 'High'
         return 0
 
-# --- Main Calculation Function ---
+# --- Main Calculation Function (copied from previous response - assumed correct) ---
 def calculate_stock_score(data):
     """
     Calculates the total stock score and category scores based on input data.
@@ -340,7 +343,7 @@ def calculate_stock_score(data):
         management_score * 0.10 +
         moat_score * 0.10 +
         risk_score * 0.10
-    ) 
+    )
 
     # Determine recommendation
     if total_score > 7.5:
@@ -364,119 +367,142 @@ def calculate_stock_score(data):
         }
     }
 
-# --- Data Fetching and Calculation Functions ---
+# --- Data Fetching and Calculation Functions (Enhanced) ---
 
 def calculate_cagr(series):
     """Calculates Compound Annual Growth Rate for a series over multiple periods."""
-    if len(series) < 2:
+    if not isinstance(series, pd.Series) or len(series) < 2:
         return 0.0
     series = series.sort_index()
     try:
         start_value = series.iloc[0]
         end_value = series.iloc[-1]
         num_periods = len(series) - 1
-        if start_value <= 0:
+        # Avoid division by zero or log of negative numbers
+        if start_value <= 0 or num_periods == 0:
             return 0.0
+        # Handle potential negative growth that might lead to negative number under root
+        if end_value / start_value < 0 and num_periods % 2 == 0:
+            return 0.0 # Cannot calculate real root for negative base and even root
         return (end_value / start_value)**(1/num_periods) - 1
-    except (ZeroDivisionError, ValueError):
+    except (ZeroDivisionError, ValueError, TypeError):
         return 0.0
 
 def calculate_rsi(data, window=14):
     """Calculates the Relative Strength Index (RSI)."""
-    if 'Close' not in data.columns or len(data) < window:
-        return 50
+    if not isinstance(data, pd.DataFrame) or 'Close' not in data.columns or len(data) < window:
+        return 50.0 # Return float
     delta = data['Close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=window).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=window).mean()
 
-    # Handle cases where loss is zero to avoid division by zero
-    if loss.iloc[-1] == 0:
-        rs = np.inf if gain.iloc[-1] > 0 else 0
-    else:
+    # Handle cases where loss is zero to avoid division by zero or NaN results
+    rs = np.inf # Default for infinite RS
+    if loss.iloc[-1] != 0 and pd.notna(gain.iloc[-1]) and pd.notna(loss.iloc[-1]):
         rs = gain.iloc[-1] / loss.iloc[-1]
+    elif gain.iloc[-1] == 0 and loss.iloc[-1] == 0:
+        rs = 0 # No movement, RS is 0
 
     rsi = 100 - (100 / (1 + rs))
-    return rsi if not pd.isna(rsi) else 50
+    return rsi if pd.notna(rsi) else 50.0 # Return float
 
 def calculate_macd(data, fast_period=12, slow_period=26, signal_period=9):
     """Calculates MACD and MACD Signal."""
-    if 'Close' not in data.columns or len(data) < max(fast_period, slow_period, signal_period):
+    if not isinstance(data, pd.DataFrame) or 'Close' not in data.columns or len(data) < max(fast_period, slow_period, signal_period):
         return 'Neutral'
 
-    ema_fast = data['Close'].ewm(span=fast_period, adjust=False).mean()
-    ema_slow = data['Close'].ewm(span=slow_period, adjust=False).mean()
-    macd = ema_fast - ema_slow
-    signal_line = macd.ewm(span=signal_period, adjust=False).mean()
+    try:
+        ema_fast = data['Close'].ewm(span=fast_period, adjust=False).mean()
+        ema_slow = data['Close'].ewm(span=slow_period, adjust=False).mean()
+        macd = ema_fast - ema_slow
+        signal_line = macd.ewm(span=signal_period, adjust=False).mean()
 
-    if len(macd) < 2 or len(signal_line) < 2 or pd.isna(macd.iloc[-1]) or pd.isna(signal_line.iloc[-1]):
-        return 'Neutral'
+        # Ensure we have enough data points for comparison
+        if len(macd) < 2 or len(signal_line) < 2 or pd.isna(macd.iloc[-1]) or pd.isna(signal_line.iloc[-1]) or pd.isna(macd.iloc[-2]) or pd.isna(signal_line.iloc[-2]):
+            return 'Neutral'
 
-    if macd.iloc[-2] < signal_line.iloc[-2] and macd.iloc[-1] > signal_line.iloc[-1]:
-        return 'Bullish crossover'
-    elif macd.iloc[-2] > signal_line.iloc[-2] and macd.iloc[-1] < signal_line.iloc[-1]:
-        return 'Bearish crossover'
-    else:
+        if macd.iloc[-2] < signal_line.iloc[-2] and macd.iloc[-1] > signal_line.iloc[-1]:
+            return 'Bullish crossover'
+        elif macd.iloc[-2] > signal_line.iloc[-2] and macd.iloc[-1] < signal_line.iloc[-1]:
+            return 'Bearish crossover'
+        else:
+            return 'Neutral'
+    except Exception:
         return 'Neutral'
 
 def get_ma_cross_status(data, short_window=50, long_window=200):
     """Determines 50D/200D MA cross status."""
-    if 'Close' not in data.columns or len(data) < long_window:
+    if not isinstance(data, pd.DataFrame) or 'Close' not in data.columns or len(data) < long_window:
         return 'Flat'
 
-    data[f'SMA_{short_window}'] = data['Close'].rolling(window=short_window).mean()
-    data[f'SMA_{long_window}'] = data['Close'].rolling(window=long_window).mean()
+    try:
+        data[f'SMA_{short_window}'] = data['Close'].rolling(window=short_window).mean()
+        data[f'SMA_{long_window}'] = data['Close'].rolling(window=long_window).mean()
 
-    if pd.isna(data[f'SMA_{long_window}'].iloc[-1]) or pd.isna(data[f'SMA_{long_window}'].iloc[-2]):
-        return 'Flat'
+        # Check for NaN in the latest MA values
+        if pd.isna(data[f'SMA_{long_window}'].iloc[-1]) or pd.isna(data[f'SMA_{long_window}'].iloc[-2]) or \
+           pd.isna(data[f'SMA_{short_window}'].iloc[-1]) or pd.isna(data[f'SMA_{short_window}'].iloc[-2]):
+            return 'Flat'
 
-    short_ma = data[f'SMA_{short_window}'].iloc[-1]
-    long_ma = data[f'SMA_{long_window}'].iloc[-1]
-    short_ma_prev = data[f'SMA_{short_window}'].iloc[-2]
-    long_ma_prev = data[f'SMA_{long_window}'].iloc[-2]
+        short_ma = data[f'SMA_{short_window}'].iloc[-1]
+        long_ma = data[f'SMA_{long_window}'].iloc[-1]
+        short_ma_prev = data[f'SMA_{short_window}'].iloc[-2]
+        long_ma_prev = data[f'SMA_{long_window}'].iloc[-2]
 
-    if short_ma > long_ma and short_ma_prev <= long_ma_prev:
-        return 'Golden Cross'
-    elif short_ma < long_ma and short_ma_prev >= long_ma_prev:
-        return 'Death Cross'
-    else:
+        if short_ma > long_ma and short_ma_prev <= long_ma_prev:
+            return 'Golden Cross'
+        elif short_ma < long_ma and short_ma_prev >= long_ma_prev:
+            return 'Death Cross'
+        else:
+            return 'Flat'
+    except Exception:
         return 'Flat'
 
 def get_volume_trend(data, short_period=30, long_period=90):
     """Determines volume trend based on recent and historical average volume."""
-    if 'Volume' not in data.columns or 'Close' not in data.columns or len(data) < long_period:
+    if not isinstance(data, pd.DataFrame) or 'Volume' not in data.columns or 'Close' not in data.columns or len(data) < long_period:
         return 'Flat'
 
-    recent_avg_volume = data['Volume'].iloc[-short_period:].mean()
-    long_term_avg_volume = data['Volume'].iloc[-long_period:].mean()
+    try:
+        # Ensure enough data points for slicing
+        if len(data) < long_period:
+            return 'Flat'
 
-    recent_avg_price = data['Close'].iloc[-short_period:].mean()
-    long_term_avg_price = data['Close'].iloc[-long_period:].mean()
+        recent_avg_volume = data['Volume'].iloc[-short_period:].mean()
+        long_term_avg_volume = data['Volume'].iloc[-long_period:].mean()
 
-    if recent_avg_volume > 1.2 * long_term_avg_volume and recent_avg_price > long_term_avg_price:
-        return 'Rising with price'
-    elif recent_avg_volume < 0.8 * long_term_avg_volume and recent_avg_price < long_term_avg_price:
-        return 'Falling with price'
-    else:
+        recent_avg_price = data['Close'].iloc[-short_period:].mean()
+        long_term_avg_price = data['Close'].iloc[-long_period:].mean()
+
+        # Avoid division by zero for percentage comparison
+        if long_term_avg_volume == 0 or long_term_avg_price == 0:
+            return 'Flat'
+
+        if recent_avg_volume > 1.2 * long_term_avg_volume and recent_avg_price > long_term_avg_price:
+            return 'Rising with price'
+        elif recent_avg_volume < 0.8 * long_term_avg_volume and recent_avg_price < long_term_avg_price:
+            return 'Falling with price'
+        else:
+            return 'Flat'
+    except Exception:
         return 'Flat'
 
 # FMP API Calls
 def fetch_fmp_industry_pe(industry_name, current_pe_value):
     """Attempts to determine PE vs Industry based on provided current_pe and a hypothetical industry average.
-    Requires FMP Industry PE API, which is not directly simple for free tier without a date/exchange lookup.
-    This function will simply use an arbitrary threshold based on current PE as a substitute for actual comparison."""
-    
-    # In a real application, you'd fetch industry average PE from FMP
-    # Example: https://financialmodelingprep.com/api/v4/industry_price_earning_ratio?date=YYYY-MM-DD&exchange=NYSE&apikey=YOUR_API_KEY
-    # This requires dynamic date and accurate industry name mapping.
-    # For now, we'll make a simplified assumption.
-    # User requested to add this line for reference:
-    # https://financialmodelingprep.com/api/v4/industry_price_earning_ratio?date=YYYY-MM-DD&exchange=NYSE&apikey=YOUR_API_KEY
-    
+    This function currently uses an arbitrary threshold. For a real comparison, a paid FMP subscription or
+    another source for industry P/E would be needed."""
+
     if current_pe_value is None:
         return '~ Industry Avg' # Cannot determine without current PE
 
-    # These thresholds are arbitrary and for demonstration only.
-    # A proper implementation would compare against an actual fetched industry average.
+    # Note: The free FMP tier does not provide a straightforward way to get industry average PE for a given ticker
+    # without a specific date and exchange query which is complex to generalize.
+    # The current implementation remains a placeholder/approximation.
+    # User requested to add this line for reference:
+    # https://financialmodelingprep.com/api/v4/industry_price_earning_ratio?date=YYYY-MM-DD&exchange=NYSE&apikey=YOUR_API_KEY
+
+    # These thresholds are arbitrary and for demonstration only, not based on actual FMP industry data.
     if current_pe_value < 15:
         return 'Less than Industry Avg'
     elif current_pe_value > 30:
@@ -489,28 +515,38 @@ def fetch_fmp_analyst_recommendations(ticker):
     if not FMP_API_KEY:
         return 'Hold'
     try:
-        url = f"https://financialmodelingprep.com/api/v3/analyst-stock-recommendations/{ticker}?limit=1&apikey={FMP_API_KEY}"
-        response = requests.get(url, timeout=5) # Add timeout
+        # Using a higher limit to potentially get more recent recommendations if available
+        url = f"https://financialmodelingprep.com/api/v3/analyst-stock-recommendations/{ticker}?limit=5&apikey={FMP_API_KEY}"
+        response = requests.get(url, timeout=10) # Increased timeout
         response.raise_for_status() # This will raise an HTTPError for 4xx/5xx responses
         data = response.json()
+
         if data and isinstance(data, list) and len(data) > 0:
-            recommendation_score = data[0].get('rating', 'Hold')
-            if 'buy' in recommendation_score.lower() and 'strong' in recommendation_score.lower():
+            # Take the most recent recommendation (first in the list by default from FMP)
+            recommendation_score_raw = data[0].get('rating', 'Hold').lower()
+            if 'strong buy' in recommendation_score_raw:
                 return 'Strong Buy'
-            elif 'buy' in recommendation_score.lower():
+            elif 'buy' in recommendation_score_raw:
                 return 'Buy'
-            elif 'hold' in recommendation_score.lower():
+            elif 'hold' in recommendation_score_raw:
                 return 'Hold'
-            elif 'sell' in recommendation_score.lower():
+            elif 'sell' in recommendation_score_raw:
                 return 'Sell'
+            elif 'strong sell' in recommendation_score_raw: # FMP sometimes has 'strong sell'
+                return 'Sell'
+        return 'Hold' # Default if no valid recommendation found
+    except requests.exceptions.HTTPError as e:
+        if e.response.status_code == 403:
+            return 'Hold' # API key issue/rate limit
         return 'Hold'
-    except requests.exceptions.RequestException as e:
-        # st.warning(f"FMP Analyst Recommendations API Error: {e}. Defaulting to 'Hold'.")
-        # Suppress in-app warnings here, errors will be collected and shown at the end
-        pass
-    except (KeyError, IndexError, TypeError) as e:
-        # st.warning(f"FMP Analyst Recommendations data parsing error: {e}. Defaulting to 'Hold'.")
-        pass
+    except requests.exceptions.ConnectionError:
+        return 'Hold'
+    except requests.exceptions.Timeout:
+        return 'Hold'
+    except requests.exceptions.RequestException:
+        return 'Hold'
+    except (KeyError, IndexError, TypeError):
+        return 'Hold'
     return 'Hold'
 
 def fetch_fmp_insider_trading(ticker):
@@ -518,36 +554,47 @@ def fetch_fmp_insider_trading(ticker):
     if not FMP_API_KEY:
         return 'Net neutral'
     try:
-        url = f"https://financialmodelingprep.com/api/v3/insider-trading?symbol={ticker}&limit=20&apikey={FMP_API_KEY}" # Get more data for better trend
-        response = requests.get(url, timeout=5)
+        # Get more data for better trend analysis (e.g., last 50 transactions)
+        url = f"https://financialmodelingprep.com/api/v3/insider-trading?symbol={ticker}&limit=50&apikey={FMP_API_KEY}"
+        response = requests.get(url, timeout=10) # Increased timeout
         response.raise_for_status()
         data = response.json()
 
         if not data or not isinstance(data, list):
             return 'Net neutral'
 
-        buy_value = 0
-        sell_value = 0
+        buy_value = 0.0
+        sell_value = 0.0
         for transaction in data:
             if 'transactionType' in transaction and 'value' in transaction:
-                # Value can be negative for sales, take absolute for summation
-                if 'buy' in transaction['transactionType'].lower():
-                    buy_value += abs(float(transaction['value']))
-                elif 'sell' in transaction['transactionType'].lower():
-                    sell_value += abs(float(transaction['value']))
+                try:
+                    value = float(transaction['value'])
+                    if 'buy' in transaction['transactionType'].lower():
+                        buy_value += abs(value)
+                    elif 'sell' in transaction['transactionType'].lower():
+                        sell_value += abs(value) # Take absolute as value might be negative for sales
+                except (ValueError, TypeError):
+                    continue # Skip malformed entries
 
-        if buy_value > sell_value * 1.5:
+        # Define thresholds for 'More buying'/'More selling'
+        if buy_value > sell_value * 1.5: # 50% more buying than selling
             return 'More buying'
-        elif sell_value > buy_value * 1.5:
+        elif sell_value > buy_value * 1.5: # 50% more selling than buying
             return 'More selling'
         else:
             return 'Net neutral'
-    except requests.exceptions.RequestException as e:
-        # st.warning(f"FMP Insider Trading API Error: {e}. Defaulting to 'Net neutral'.")
-        pass
-    except (KeyError, IndexError, ValueError, TypeError) as e:
-        # st.warning(f"FMP Insider Trading data parsing error: {e}. Defaulting to 'Net neutral'.")
-        pass
+    except requests.exceptions.HTTPError as e:
+        if e.response.status_code == 403:
+            return 'Net neutral' # API key issue/rate limit
+        return 'Net neutral'
+    except requests.exceptions.ConnectionError:
+        return 'Net neutral'
+    except requests.exceptions.Timeout:
+        return 'Net neutral'
+    except requests.exceptions.RequestException:
+        return 'Net neutral'
+    except (KeyError, IndexError, TypeError):
+        return 'Net neutral'
     return 'Net neutral'
 
 # EODHD API Call
@@ -557,21 +604,22 @@ def fetch_eodhd_news_sentiment(ticker):
         return 'Neutral'
     try:
         today = pd.to_datetime('today').strftime('%Y-%m-%d')
-        ninety_days_ago = (pd.to_datetime('today') - pd.DateOffset(days=90)).strftime('%Y-%m-%d') # More days for better sentiment
-        
-        # EODHD often requires ticker.EX for US stocks, e.g., AAPL.US
-        # Try to append .US if not already present and not explicitly an international ticker
-        if '.' not in ticker and not any(char.islower() for char in ticker): # Simple check for common US tickers
-            eodhd_ticker = f"{ticker}.US"
-        else:
-            eodhd_ticker = ticker
+        # Fetch data for the last 180 days for a more stable sentiment
+        ninety_days_ago = (pd.to_datetime('today') - pd.DateOffset(days=180)).strftime('%Y-%m-%d')
 
+        # EODHD often requires ticker.EX for US stocks, e.g., AAPL.US
+        # Attempt to append .US if not already present and looks like a common US ticker
+        eodhd_ticker = ticker
+        if '.' not in ticker and not any(char.islower() for char in ticker):
+            eodhd_ticker = f"{ticker}.US"
+        # Else, assume it's already in a correct format for EODHD (e.g., TSLA, RELIANCE.NSE)
 
         url = f"https://eodhd.com/api/sentiments?s={eodhd_ticker}&from={ninety_days_ago}&to={today}&api_token={EODHD_API_KEY}"
-        response = requests.get(url, timeout=5)
+        response = requests.get(url, timeout=10) # Increased timeout
         response.raise_for_status()
         data = response.json()
 
+        # EODHD sentiment API structure can vary, check for key existence
         if data and eodhd_ticker in data and 'general' in data[eodhd_ticker] and 'sentiment' in data[eodhd_ticker]['general']:
             sentiment_score = data[eodhd_ticker]['general']['sentiment'] # Score from -1 to 1
             if sentiment_score > 0.3:
@@ -580,12 +628,27 @@ def fetch_eodhd_news_sentiment(ticker):
                 return 'Negative'
             else:
                 return 'Neutral'
-    except requests.exceptions.RequestException as e:
-        # st.warning(f"EODHD News Sentiment API Error: {e}. Defaulting to 'Neutral'.")
-        pass
-    except (KeyError, IndexError, TypeError) as e:
-        # st.warning(f"EODHD News Sentiment data parsing error: {e}. Defaulting to 'Neutral'.")
-        pass
+        elif data and 'general' in data and 'sentiment' in data['general']: # Sometimes the ticker key is omitted if only one ticker is requested
+            sentiment_score = data['general']['sentiment']
+            if sentiment_score > 0.3:
+                return 'Positive'
+            elif sentiment_score < -0.3:
+                return 'Negative'
+            else:
+                return 'Neutral'
+        return 'Neutral'
+    except requests.exceptions.HTTPError as e:
+        if e.response.status_code == 403:
+            return 'Neutral' # API key issue/rate limit
+        return 'Neutral'
+    except requests.exceptions.ConnectionError:
+        return 'Neutral'
+    except requests.exceptions.Timeout:
+        return 'Neutral'
+    except requests.exceptions.RequestException:
+        return 'Neutral'
+    except (KeyError, IndexError, TypeError):
+        return 'Neutral'
     return 'Neutral'
 
 
@@ -597,7 +660,6 @@ def fetch_and_process_stock_data(ticker_symbol):
     errors = []
 
     # Initialize all data points with defaults (neutral/cannot determine)
-    # These will be overwritten if data is successfully fetched
     data = {
         'revenue_growth': 0.0,
         'eps_growth': 0.0,
@@ -612,7 +674,7 @@ def fetch_and_process_stock_data(ticker_symbol):
         'insider_trading': 'Net neutral',
         'news_sentiment': 'Neutral',
         'analyst_recommendations': 'Hold',
-        'rsi': 50,
+        'rsi': 50.0,
         'ma_cross': 'Flat',
         'macd_signal': 'Neutral',
         'volume_trend': 'Flat',
@@ -628,100 +690,129 @@ def fetch_and_process_stock_data(ticker_symbol):
     info = None
     try:
         info = stock.info
-        if not info or not info.get('regularMarketPrice'):
-            errors.append(f"No valid basic info found for {ticker_symbol} from yfinance. It might be an invalid ticker or delisted.")
-            # Do not return immediately, allow other API calls to proceed if possible
+        if not info or not isinstance(info, dict) or not info.get('regularMarketPrice'):
+            errors.append(f"No valid basic info found for {ticker_symbol} from yfinance. It might be an invalid ticker or delisted. Some parameters will be defaulted.")
         else:
             data['beta'] = info.get('beta', data['beta'])
             data['dividend_yield'] = info.get('dividendYield', data['dividend_yield'])
             data['peg_ratio'] = info.get('pegRatio', data['peg_ratio'])
             data['price_book_ratio'] = info.get('priceToBook', data['price_book_ratio'])
             current_pe = info.get('trailingPE', None)
-            data['pe_vs_industry'] = fetch_fmp_industry_pe(info.get('industry'), current_pe)
+            data['pe_vs_industry'] = fetch_fmp_industry_pe(info.get('industry'), current_pe) # Uses dummy FMP for now
+    except Exception as e:
+        errors.append(f"Error fetching basic info from yfinance for {ticker_symbol}: {e}. Defaults used.")
+    
+    # Introduce a small delay if making multiple yfinance calls or switching APIs
+    time.sleep(0.5)
+
+    try:
+        annual_financials = stock.financials
+        if annual_financials is None or annual_financials.empty:
+            errors.append("Could not fetch annual financials from yfinance or it's empty. Revenue growth, Operating Margin, Interest Coverage Ratio defaulted.")
+        else:
+            annual_financials.columns = pd.to_datetime(annual_financials.columns)
+            annual_financials = annual_financials.sort_index(axis=1, ascending=False) # Sort columns by date, most recent first
+
+            # Revenue Growth
+            if 'Total Revenue' in annual_financials.index and len(annual_financials.columns) >= 4:
+                revenue = annual_financials.loc['Total Revenue'].iloc[:4].sort_index(ascending=True) # Last 4 years
+                if not revenue.empty and revenue.iloc[0] > 0: # Ensure valid starting point
+                    data['revenue_growth'] = calculate_cagr(revenue)
+                else: errors.append("Insufficient or invalid 'Total Revenue' data from yfinance for 3Y CAGR calculation.")
+            else: errors.append("Missing 'Total Revenue' or insufficient data from yfinance for Revenue Growth.")
+
+            # Operating Margin
+            op_income_idx = 'Operating Income'
+            total_revenue_idx = 'Total Revenue'
+            if op_income_idx in annual_financials.index and total_revenue_idx in annual_financials.index and not annual_financials.columns.empty:
+                op_income = annual_financials.loc[op_income_idx, annual_financials.columns[0]]
+                total_revenue = annual_financials.loc[total_revenue_idx, annual_financials.columns[0]]
+                if pd.notna(total_revenue) and total_revenue != 0:
+                    data['operating_margin'] = op_income / total_revenue
+                else: errors.append("Total Revenue is zero or NaN for Operating Margin (yfinance).")
+            else: errors.append("Missing 'Operating Income' or 'Total Revenue' for Operating Margin (yfinance).")
+
+            # Interest Coverage Ratio
+            if 'Operating Income' in annual_financials.index and 'Interest Expense' in annual_financials.index and not annual_financials.columns.empty:
+                operating_income = annual_financials.loc['Operating Income', annual_financials.columns[0]]
+                interest_expense = annual_financials.loc['Interest Expense', annual_financials.columns[0]]
+                if pd.notna(interest_expense) and interest_expense != 0:
+                    data['interest_coverage_ratio'] = operating_income / interest_expense
+                else:
+                    data['interest_coverage_ratio'] = 1000.0 # Very high if no interest expense or zero interest
+                    if interest_expense == 0: errors.append("Interest Expense is zero, Interest Coverage Ratio set to very high (yfinance).")
+                    else: errors.append("Missing or NaN Operating Income/Interest Expense for Interest Coverage Ratio (yfinance).")
+            else: errors.append("Missing 'Operating Income' or 'Interest Expense' for Interest Coverage Ratio (yfinance).")
 
     except Exception as e:
-        errors.append(f"Could not fetch basic info from yfinance for {ticker_symbol}: {e}. Defaults used.")
+        errors.append(f"Error processing yfinance annual financials for {ticker_symbol}: {e}. Defaults used.")
 
+    time.sleep(0.5) # Delay
 
-    annual_financials = pd.DataFrame() # Initialize as empty DataFrame
     try:
-        # Check if info was successfully fetched to get currency and period
-        if info and info.get('financialCurrency'): # Check for info and if it contains expected key
-            annual_financials = stock.financials
-            if annual_financials is None or annual_financials.empty:
-                errors.append("Could not fetch annual financials from yfinance or it's empty.")
-            else:
-                # Ensure column index is date-like for sorting
-                annual_financials.columns = pd.to_datetime(annual_financials.columns)
-
-                if 'Total Revenue' in annual_financials.index and len(annual_financials.columns) >= 4: # Needs 4 years for 3Y CAGR
-                    revenue = annual_financials.loc['Total Revenue'].sort_index(ascending=True) # Sort by date index
-                    data['revenue_growth'] = calculate_cagr(revenue.iloc[-4:])
-                else: errors.append("Insufficient 'Total Revenue' data from yfinance for 3Y CAGR.")
-
-                # Fetch and process EPS growth
-                annual_earnings = stock.earnings
-                if annual_earnings is None or annual_earnings.empty:
-                    errors.append("Could not fetch annual earnings from yfinance or it's empty.")
-                else:
-                    annual_earnings.columns = pd.to_datetime(annual_earnings.columns)
-                    if 'Basic EPS' in annual_earnings.index and len(annual_earnings.columns) >= 4:
-                        eps = annual_earnings.loc['Basic EPS'].sort_index(ascending=True)
-                        data['eps_growth'] = calculate_cagr(eps.iloc[-4:])
-                    else: errors.append("Insufficient 'Basic EPS' data from yfinance for 3Y CAGR.")
-
-                op_income_idx = 'Operating Income' if 'Operating Income' in annual_financials.index else ('Gross Profit' if 'Gross Profit' in annual_financials.index else None)
-                if op_income_idx and 'Total Revenue' in annual_financials.index and not annual_financials.columns.empty:
-                    op_income = annual_financials.loc[op_income_idx, annual_financials.columns[0]]
-                    total_revenue = annual_financials.loc['Total Revenue', annual_financials.columns[0]]
-                    if pd.notna(total_revenue) and total_revenue != 0: data['operating_margin'] = op_income / total_revenue
-                    else: errors.append("Total Revenue is zero or NaN for Operating Margin (yfinance).")
-                else: errors.append("Missing operating income/total revenue for Operating Margin (yfinance).")
-
-                if 'Operating Income' in annual_financials.index and 'Interest Expense' in annual_financials.index and not annual_financials.columns.empty:
-                    operating_income = annual_financials.loc['Operating Income', annual_financials.columns[0]]
-                    interest_expense = annual_financials.loc['Interest Expense', annual_financials.columns[0]]
-                    if pd.notna(interest_expense) and interest_expense != 0: data['interest_coverage_ratio'] = operating_income / interest_expense
-                    else: data['interest_coverage_ratio'] = 1000.0 # Very high if no interest expense
-                else: errors.append("Missing operating income/interest expense for Interest Coverage Ratio (yfinance).")
-
+        annual_earnings = stock.earnings
+        if annual_earnings is None or annual_earnings.empty:
+            errors.append("Could not fetch annual earnings from yfinance or it's empty. EPS Growth defaulted.")
         else:
-            errors.append("Basic info not fetched, or financial currency missing, so financials cannot be fetched accurately from yfinance.")
+            annual_earnings.columns = pd.to_datetime(annual_earnings.columns)
+            annual_earnings = annual_earnings.sort_index(axis=1, ascending=False) # Sort columns by date, most recent first
 
-        annual_balance_sheet = stock.balance_sheet # This might also return None
+            # EPS Growth
+            if 'Basic EPS' in annual_earnings.index and len(annual_earnings.columns) >= 4:
+                eps = annual_earnings.loc['Basic EPS'].iloc[:4].sort_index(ascending=True) # Last 4 years
+                if not eps.empty and eps.iloc[0] != 0: # Ensure valid starting point
+                    data['eps_growth'] = calculate_cagr(eps)
+                else: errors.append("Insufficient or invalid 'Basic EPS' data from yfinance for 3Y CAGR calculation.")
+            else: errors.append("Missing 'Basic EPS' or insufficient data from yfinance for EPS Growth.")
+    except Exception as e:
+        errors.append(f"Error processing yfinance annual earnings for {ticker_symbol}: {e}. Defaults used.")
+
+    time.sleep(0.5) # Delay
+
+    try:
+        annual_balance_sheet = stock.balance_sheet
         if annual_balance_sheet is None or annual_balance_sheet.empty:
-            errors.append("Could not fetch balance sheet from yfinance or it's empty.")
+            errors.append("Could not fetch balance sheet from yfinance or it's empty. ROE and Debt/Equity defaulted.")
         else:
-            annual_balance_sheet.columns = pd.to_datetime(annual_balance_sheet.columns) # Ensure column index is date-like
+            annual_balance_sheet.columns = pd.to_datetime(annual_balance_sheet.columns)
+            annual_balance_sheet = annual_balance_sheet.sort_index(axis=1, ascending=False) # Sort columns by date, most recent first
 
-            if 'Net Income' in annual_financials.index and 'Total Stockholder Equity' in annual_balance_sheet.index and not annual_financials.columns.empty and not annual_balance_sheet.columns.empty:
+            # ROE
+            if 'Net Income' in annual_financials.index and 'Total Stockholder Equity' in annual_balance_sheet.index and \
+               not annual_financials.columns.empty and not annual_balance_sheet.columns.empty:
                 net_income_latest = annual_financials.loc['Net Income', annual_financials.columns[0]]
                 total_equity_latest = annual_balance_sheet.loc['Total Stockholder Equity', annual_balance_sheet.columns[0]]
-                if pd.notna(total_equity_latest) and total_equity_latest != 0: data['roe'] = net_income_latest / total_equity_latest
+                if pd.notna(total_equity_latest) and total_equity_latest != 0:
+                    data['roe'] = net_income_latest / total_equity_latest
                 else: errors.append("Total Stockholder Equity is zero or NaN for ROE (yfinance).")
-            else: errors.append("Missing Net Income/Total Stockholder Equity for ROE (yfinance).")
+            else: errors.append("Missing 'Net Income' (from financials) or 'Total Stockholder Equity' (from balance sheet) for ROE (yfinance).")
 
-            if 'Total Debt' in annual_balance_sheet.index and 'Total Stockholder Equity' in annual_balance_sheet.index and not annual_balance_sheet.columns.empty:
+            # Debt/Equity
+            if 'Total Debt' in annual_balance_sheet.index and 'Total Stockholder Equity' in annual_balance_sheet.index and \
+               not annual_balance_sheet.columns.empty:
                 total_debt_latest = annual_balance_sheet.loc['Total Debt', annual_balance_sheet.columns[0]]
                 total_equity_latest = annual_balance_sheet.loc['Total Stockholder Equity', annual_balance_sheet.columns[0]]
-                if pd.notna(total_equity_latest) and total_equity_latest != 0: data['debt_equity'] = total_debt_latest / total_equity_latest
+                if pd.notna(total_equity_latest) and total_equity_latest != 0:
+                    data['debt_equity'] = total_debt_latest / total_equity_latest
                 else: errors.append("Total Stockholder Equity is zero or NaN for Debt/Equity (yfinance).")
-            else: errors.append("Missing Total Debt/Total Stockholder Equity for Debt/Equity (yfinance).")
-        
+            else: errors.append("Missing 'Total Debt' or 'Total Stockholder Equity' for Debt/Equity (yfinance).")
+
     except Exception as e:
-        errors.append(f"An error occurred while processing yfinance financials/balance sheet for {ticker_symbol}: {e}. Defaults used.")
+        errors.append(f"Error processing yfinance balance sheet for {ticker_symbol}: {e}. Defaults used.")
+
+    time.sleep(0.5) # Delay
 
     try:
-        hist = stock.history(period="1y", interval="1d")
+        hist = stock.history(period="1y", interval="1d") # 1 year daily data
         if hist is None or hist.empty:
-            errors.append("Could not fetch historical data from yfinance for technicals or it's empty.")
+            errors.append("Could not fetch historical data from yfinance for technicals or it's empty. Technical indicators defaulted.")
         else:
             data['rsi'] = calculate_rsi(hist)
             data['ma_cross'] = get_ma_cross_status(hist)
             data['macd_signal'] = calculate_macd(hist)
             data['volume_trend'] = get_volume_trend(hist)
     except Exception as e:
-        errors.append(f"An error occurred while processing yfinance historical data for {ticker_symbol}: {e}. Defaults used for technicals.")
+        errors.append(f"Error fetching/processing yfinance historical data for {ticker_symbol}: {e}. Defaults used for technicals.")
 
     # --- Supplementing with other APIs (FMP, EODHD) ---
 
@@ -729,32 +820,35 @@ def fetch_and_process_stock_data(ticker_symbol):
     if FMP_API_KEY:
         analyst_rec = fetch_fmp_analyst_recommendations(ticker_symbol)
         data['analyst_recommendations'] = analyst_rec
-        if analyst_rec == 'Hold':
-            errors.append("FMP Analyst Recommendations might be unavailable or defaulted (check API key/rate limits or data for ticker).")
+        if analyst_rec == 'Hold': # This means it either defaulted or genuinely is a 'Hold'
+            errors.append("FMP Analyst Recommendations might be unavailable/rate-limited/defaulted for this ticker. Check API key and FMP data for the ticker.")
     else:
         errors.append("FMP API Key not provided. Analyst Recommendations defaulted.")
+    time.sleep(0.5) # Delay between API calls
 
     # FMP: Insider Trading
     if FMP_API_KEY:
         insider_trend = fetch_fmp_insider_trading(ticker_symbol)
         data['insider_trading'] = insider_trend
         if insider_trend == 'Net neutral':
-            errors.append("FMP Insider Trading might be unavailable or defaulted (check API key/rate limits or data for ticker).")
+            errors.append("FMP Insider Trading might be unavailable/rate-limited/defaulted for this ticker. Check API key and FMP data for the ticker.")
     else:
         errors.append("FMP API Key not provided. Insider Trading defaulted.")
+    time.sleep(0.5) # Delay between API calls
 
     # EODHD: News Sentiment
     if EODHD_API_KEY:
         news_sent = fetch_eodhd_news_sentiment(ticker_symbol)
         data['news_sentiment'] = news_sent
         if news_sent == 'Neutral':
-            errors.append("EODHD News Sentiment might be unavailable or defaulted (check API key/rate limits or data for ticker).")
+            errors.append("EODHD News Sentiment might be unavailable/rate-limited/defaulted for this ticker. Check API key and EODHD data for the ticker (EODHD often needs '.US' for US tickers).")
     else:
         errors.append("EODHD API Key not provided. News Sentiment defaulted.")
+    time.sleep(0.5) # Final small delay
 
     return data, errors
 
-# --- Streamlit UI ---
+# --- Streamlit UI (Copied from original, assumed correct) ---
 
 st.set_page_config(layout="centered", page_title="Stock Scoring Model (Auto-Fetch)")
 
@@ -770,9 +864,9 @@ st.markdown("""
     * Moat & Competitiveness: Brand Value / Moat, Market Share Leadership
     * Risk Factors (Non-Beta): Litigation/Political Risk
     * *These require your qualitative judgment or more advanced (often paid) data sources.*
--   **P/E Ratio vs Industry:** The model attempts a simplified comparison. For accurate industry-relative P/E, manual research of the industry average or a dedicated API for this purpose is recommended.
--   **Data Availability:** Data from `yfinance` and other free APIs can be inconsistent or incomplete for some tickers. If a parameter cannot be fetched, its default value will be used, and a warning will be displayed.
--   **Rate Limits:** Free APIs have strict rate limits. Frequent requests may lead to temporary blocking.
+-   **P/E Ratio vs Industry:** The model attempts a simplified comparison. For accurate industry-relative P/E, manual research of the industry average or a dedicated API for this purpose is recommended. The current FMP integration for this specific point is a placeholder for actual industry comparison via API.
+-   **Data Availability & Quality:** Data from `yfinance` and other free APIs can be inconsistent, incomplete, or have delays for some tickers. If a parameter cannot be fetched or is malformed, its default value will be used, and a warning will be displayed.
+-   **Rate Limits:** Free APIs have strict rate limits. Frequent requests may lead to temporary blocking. Caching (`@st.cache_data`) helps, but external factors are still possible.
 """)
 
 
@@ -823,7 +917,7 @@ if calculate_button and ticker_symbol:
     * **Valuation**: 20%
     * **Market Sentiment**: 10%
     * **Technical Trends**: 10%
-    * **Quality of Management**: 10%
+    * **Management Quality**: 10%
     * **Moat/Competitiveness**: 10%
     * **Risk Factors**: 10%
     """)
