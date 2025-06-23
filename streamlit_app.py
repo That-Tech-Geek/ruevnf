@@ -329,7 +329,7 @@ def calculate_stock_score(data):
         management_score * 0.10 +
         moat_score * 0.10 +
         risk_score * 0.10
-    ) * 100 # Scale to 0-100
+    )
 
     # Determine recommendation
     if total_score > 5:
