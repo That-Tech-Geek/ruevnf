@@ -5,7 +5,7 @@ import numpy as np
 import requests # For making HTTP requests to other APIs
 
 FMP_API_KEY = st.secrets["FMP-API-KEY"]
-
+EODHD_API_KEY = st.secrets["EODHD-API-KEY"]
 # --- Scoring Logic Functions (copied from previous response) ---
 
 def score_revenue_growth(growth):
