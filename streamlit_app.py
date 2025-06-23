@@ -4,8 +4,16 @@ import pandas as pd
 import numpy as np
 import requests # For making HTTP requests to other APIs
 
-FMP_API_KEY = st.secrets["FMP-API-KEY"]
-EODHD_API_KEY = st.secrets["EODHD-API-KEY"]
+# --- API Keys (Accessed via st.secrets) ---
+# Ensure you have .streamlit/secrets.toml configured with your API keys:
+# FMP-API-KEY = "your_actual_fmp_api_key_here"
+# EODHD-API-KEY = "your_actual_eodhd_api_key_here"
+
+# Accessing secrets using square bracket notation
+FMP_API_KEY = st.secrets["FMP-API-KEY"] if "FMP-API-KEY" in st.secrets else ""
+EODHD_API_KEY = st.secrets["EODHD-API-KEY"] if "EODHD-API-KEY" in st.secrets else ""
+
+
 # --- Scoring Logic Functions (copied from previous response) ---
 
 def score_revenue_growth(growth):
@@ -149,7 +157,7 @@ def score_rsi(rsi):
         return 3
 
 def score_ma_cross(cross):
-    """Scores 50D/200D MA Cross on a 0-10 scale."""
+    """Scores 50D/200D MA cross status."""
     if cross == 'Golden Cross':
         return 10
     elif cross == 'Flat':
@@ -335,9 +343,9 @@ def calculate_stock_score(data):
     )
 
     # Determine recommendation
-    if total_score > 75:
+    if total_score > 7.5:
         recommendation = '✅ BUY'
-    elif 50 <= total_score <= 75:
+    elif 5 <= total_score <= 7.5:
         recommendation = '🟡 HOLD'
     else:
         recommendation = '❌ SELL'
@@ -451,18 +459,28 @@ def get_volume_trend(data, short_period=30, long_period=90):
     else:
         return 'Flat'
 
-def fetch_fmp_industry_pe(industry_name):
-    """Fetches industry average PE from FMP API."""
-    if not FMP_API_KEY:
-        return None
-    # FMP's industry name might need specific formatting or a lookup table
-    # This is a simplification; actual FMP API for industry PE usually requires a date and exchange.
-    # A more robust solution would involve fetching all industries and finding a match.
-    # For now, we'll use a generic industry PE if we can't map it directly.
-    # Example FMP Industry PE endpoint: https://financialmodelingprep.com/api/v4/industry_price_earning_ratio?date=2023-10-10&exchange=NYSE&apikey=YOUR_API_KEY
-    # This requires looking up the latest date and industry string.
-    # Given the complexity for a free tier and specific string matching, we'll return a default.
-    return None # Cannot reliably fetch with simple string match and free tier limitations
+# FMP API Calls
+def fetch_fmp_industry_pe(industry_name, current_pe_value):
+    """Attempts to determine PE vs Industry based on provided current_pe and a hypothetical industry average.
+    Requires FMP Industry PE API, which is not directly simple for free tier without a date/exchange lookup.
+    This function will simply use an arbitrary threshold based on current PE as a substitute for actual comparison."""
+    
+    # In a real application, you'd fetch industry average PE from FMP
+    # Example: https://financialmodelingprep.com/api/v4/industry_price_earning_ratio?date=YYYY-MM-DD&exchange=NYSE&apikey=YOUR_API_KEY
+    # This requires dynamic date and accurate industry name mapping.
+    # For now, we'll make a simplified assumption.
+    
+    if current_pe_value is None:
+        return '~ Industry Avg' # Cannot determine without current PE
+
+    # These thresholds are arbitrary and for demonstration only.
+    # A proper implementation would compare against an actual fetched industry average.
+    if current_pe_value < 15:
+        return 'Less than Industry Avg'
+    elif current_pe_value > 30:
+        return '> Industry Avg'
+    else:
+        return '~ Industry Avg'
 
 def fetch_fmp_analyst_recommendations(ticker):
     """Fetches analyst recommendations from FMP API."""
@@ -470,15 +488,11 @@ def fetch_fmp_analyst_recommendations(ticker):
         return 'Hold'
     try:
         url = f"https://financialmodelingprep.com/api/v3/analyst-stock-recommendations/{ticker}?limit=1&apikey={FMP_API_KEY}"
-        response = requests.get(url)
-        response.raise_for_status() # Raise HTTPError for bad responses (4xx or 5xx)
+        response = requests.get(url, timeout=5) # Add timeout
+        response.raise_for_status() # This will raise an HTTPError for 4xx/5xx responses
         data = response.json()
-        if data:
-            # FMP returns a list, usually most recent first.
-            # Look for "rating" or "recommendation" field.
-            # Example response structure might be {'rating': 'Buy', 'date': '...'}
-            recommendation_score = data[0].get('rating', 'Hold') # Get the latest rating
-            # Map FMP ratings to our categories
+        if data and isinstance(data, list) and len(data) > 0:
+            recommendation_score = data[0].get('rating', 'Hold')
             if 'buy' in recommendation_score.lower() and 'strong' in recommendation_score.lower():
                 return 'Strong Buy'
             elif 'buy' in recommendation_score.lower():
@@ -487,11 +501,14 @@ def fetch_fmp_analyst_recommendations(ticker):
                 return 'Hold'
             elif 'sell' in recommendation_score.lower():
                 return 'Sell'
-            return 'Hold' # Default if not matched
+        return 'Hold'
     except requests.exceptions.RequestException as e:
-        st.warning(f"FMP Analyst Recommendations API Error: {e}. Defaulting to 'Hold'.")
-    except (KeyError, IndexError) as e:
-        st.warning(f"FMP Analyst Recommendations data parsing error: {e}. Defaulting to 'Hold'.")
+        # st.warning(f"FMP Analyst Recommendations API Error: {e}. Defaulting to 'Hold'.")
+        # Suppress in-app warnings here, errors will be collected and shown at the end
+        pass
+    except (KeyError, IndexError, TypeError) as e:
+        # st.warning(f"FMP Analyst Recommendations data parsing error: {e}. Defaulting to 'Hold'.")
+        pass
     return 'Hold'
 
 def fetch_fmp_insider_trading(ticker):
@@ -499,55 +516,62 @@ def fetch_fmp_insider_trading(ticker):
     if not FMP_API_KEY:
         return 'Net neutral'
     try:
-        # Fetch recent insider transactions
-        url = f"https://financialmodelingprep.com/api/v3/insider-trading?symbol={ticker}&limit=10&apikey={FMP_API_KEY}"
-        response = requests.get(url)
+        url = f"https://financialmodelingprep.com/api/v3/insider-trading?symbol={ticker}&limit=20&apikey={FMP_API_KEY}" # Get more data for better trend
+        response = requests.get(url, timeout=5)
         response.raise_for_status()
         data = response.json()
 
-        if not data:
+        if not data or not isinstance(data, list):
             return 'Net neutral'
 
         buy_value = 0
         sell_value = 0
         for transaction in data:
             if 'transactionType' in transaction and 'value' in transaction:
+                # Value can be negative for sales, take absolute for summation
                 if 'buy' in transaction['transactionType'].lower():
-                    buy_value += abs(transaction['value'])
+                    buy_value += abs(float(transaction['value']))
                 elif 'sell' in transaction['transactionType'].lower():
-                    sell_value += abs(transaction['value'])
+                    sell_value += abs(float(transaction['value']))
 
-        if buy_value > sell_value * 1.5: # Significant buying
+        if buy_value > sell_value * 1.5:
             return 'More buying'
-        elif sell_value > buy_value * 1.5: # Significant selling
+        elif sell_value > buy_value * 1.5:
             return 'More selling'
         else:
             return 'Net neutral'
     except requests.exceptions.RequestException as e:
-        st.warning(f"FMP Insider Trading API Error: {e}. Defaulting to 'Net neutral'.")
-    except (KeyError, IndexError) as e:
-        st.warning(f"FMP Insider Trading data parsing error: {e}. Defaulting to 'Net neutral'.")
+        # st.warning(f"FMP Insider Trading API Error: {e}. Defaulting to 'Net neutral'.")
+        pass
+    except (KeyError, IndexError, ValueError, TypeError) as e:
+        # st.warning(f"FMP Insider Trading data parsing error: {e}. Defaulting to 'Net neutral'.")
+        pass
     return 'Net neutral'
 
-
+# EODHD API Call
 def fetch_eodhd_news_sentiment(ticker):
     """Fetches news sentiment score from EODHD API."""
     if not EODHD_API_KEY:
         return 'Neutral'
     try:
-        # EODHD sentiment API often requires date ranges and ticker format (e.g., AAPL.US)
-        # For simplicity, we'll try to fetch recent sentiment.
-        # Date for past 30 days
         today = pd.to_datetime('today').strftime('%Y-%m-%d')
-        thirty_days_ago = (pd.to_datetime('today') - pd.DateOffset(days=30)).strftime('%Y-%m-%d')
+        ninety_days_ago = (pd.to_datetime('today') - pd.DateOffset(days=90)).strftime('%Y-%m-%d') # More days for better sentiment
+        
+        # EODHD often requires ticker.EX for US stocks, e.g., AAPL.US
+        # Try to append .US if not already present and not explicitly an international ticker
+        if '.' not in ticker and not any(char.islower() for char in ticker): # Simple check for common US tickers
+            eodhd_ticker = f"{ticker}.US"
+        else:
+            eodhd_ticker = ticker
 
-        url = f"https://eodhd.com/api/sentiments?s={ticker}&from={thirty_days_ago}&to={today}&api_token={EODHD_API_KEY}"
-        response = requests.get(url)
+
+        url = f"https://eodhd.com/api/sentiments?s={eodhd_ticker}&from={ninety_days_ago}&to={today}&api_token={EODHD_API_KEY}"
+        response = requests.get(url, timeout=5)
         response.raise_for_status()
         data = response.json()
 
-        if data and ticker in data and 'general' in data[ticker] and 'sentiment' in data[ticker]['general']:
-            sentiment_score = data[ticker]['general']['sentiment'] # Score from -1 to 1
+        if data and eodhd_ticker in data and 'general' in data[eodhd_ticker] and 'sentiment' in data[eodhd_ticker]['general']:
+            sentiment_score = data[eodhd_ticker]['general']['sentiment'] # Score from -1 to 1
             if sentiment_score > 0.3:
                 return 'Positive'
             elif sentiment_score < -0.3:
@@ -555,12 +579,15 @@ def fetch_eodhd_news_sentiment(ticker):
             else:
                 return 'Neutral'
     except requests.exceptions.RequestException as e:
-        st.warning(f"EODHD News Sentiment API Error: {e}. Defaulting to 'Neutral'.")
-    except (KeyError, IndexError) as e:
-        st.warning(f"EODHD News Sentiment data parsing error: {e}. Defaulting to 'Neutral'.")
+        # st.warning(f"EODHD News Sentiment API Error: {e}. Defaulting to 'Neutral'.")
+        pass
+    except (KeyError, IndexError, TypeError) as e:
+        # st.warning(f"EODHD News Sentiment data parsing error: {e}. Defaulting to 'Neutral'.")
+        pass
     return 'Neutral'
 
 
+@st.cache_data(ttl=3600) # Cache data for 1 hour to reduce API calls
 def fetch_and_process_stock_data(ticker_symbol):
     """Fetches and processes stock data using yfinance and other external APIs."""
     stock = yf.Ticker(ticker_symbol)
@@ -596,124 +623,132 @@ def fetch_and_process_stock_data(ticker_symbol):
     }
 
     # --- Fetching from yfinance ---
+    info = None
     try:
         info = stock.info
-        if not info:
-            errors.append(f"No info found for {ticker_symbol}. It might be an invalid ticker.")
-            return data, errors # Return defaults immediately if basic info fails
-
-        data['beta'] = info.get('beta', data['beta'])
-        data['dividend_yield'] = info.get('dividendYield', data['dividend_yield'])
-        data['peg_ratio'] = info.get('pegRatio', data['peg_ratio'])
-        data['price_book_ratio'] = info.get('priceToBook', data['price_book_ratio'])
-        current_pe = info.get('trailingPE', None) # Get current PE for comparison later
-        
-        # Get industry for FMP comparison
-        stock_industry = info.get('industry', None)
-        stock_sector = info.get('sector', None)
+        if not info or not info.get('regularMarketPrice'):
+            errors.append(f"No valid basic info found for {ticker_symbol} from yfinance. It might be an invalid ticker or delisted.")
+            # Do not return immediately, allow other API calls to proceed if possible
+        else:
+            data['beta'] = info.get('beta', data['beta'])
+            data['dividend_yield'] = info.get('dividendYield', data['dividend_yield'])
+            data['peg_ratio'] = info.get('pegRatio', data['peg_ratio'])
+            data['price_book_ratio'] = info.get('priceToBook', data['price_book_ratio'])
+            current_pe = info.get('trailingPE', None)
+            data['pe_vs_industry'] = fetch_fmp_industry_pe(info.get('industry'), current_pe)
 
     except Exception as e:
         errors.append(f"Could not fetch basic info from yfinance for {ticker_symbol}: {e}. Defaults used.")
 
 
+    annual_financials = pd.DataFrame() # Initialize as empty DataFrame
     try:
-        annual_financials = stock.financials
-        if not annual_financials.empty:
-            if 'Total Revenue' in annual_financials.index and len(annual_financials.columns) >= 4:
-                revenue = annual_financials.loc['Total Revenue'].sort_index(ascending=True)
-                data['revenue_growth'] = calculate_cagr(revenue.iloc[-4:])
-            else: errors.append("Insufficient revenue data from yfinance.")
+        # Check if info was successfully fetched to get currency and period
+        if info and info.get('financialCurrency'): # Check for info and if it contains expected key
+            annual_financials = stock.financials
+            if annual_financials is None or annual_financials.empty:
+                errors.append("Could not fetch annual financials from yfinance or it's empty.")
+            else:
+                # Ensure column index is date-like for sorting
+                annual_financials.columns = pd.to_datetime(annual_financials.columns)
 
-            annual_earnings = stock.earnings
-            if not annual_earnings.empty and 'Basic EPS' in annual_earnings.index and len(annual_earnings.columns) >= 4:
-                eps = annual_earnings.loc['Basic EPS'].sort_index(ascending=True)
-                data['eps_growth'] = calculate_cagr(eps.iloc[-4:])
-            else: errors.append("Insufficient EPS data from yfinance.")
+                if 'Total Revenue' in annual_financials.index and len(annual_financials.columns) >= 4: # Needs 4 years for 3Y CAGR
+                    revenue = annual_financials.loc['Total Revenue'].sort_index(ascending=True) # Sort by date index
+                    data['revenue_growth'] = calculate_cagr(revenue.iloc[-4:])
+                else: errors.append("Insufficient 'Total Revenue' data from yfinance for 3Y CAGR.")
 
-            op_income_idx = 'Operating Income' if 'Operating Income' in annual_financials.index else ('Gross Profit' if 'Gross Profit' in annual_financials.index else None)
-            if op_income_idx and 'Total Revenue' in annual_financials.index and not annual_financials.columns.empty:
-                op_income = annual_financials.loc[op_income_idx, annual_financials.columns[0]]
-                total_revenue = annual_financials.loc['Total Revenue', annual_financials.columns[0]]
-                if total_revenue != 0: data['operating_margin'] = op_income / total_revenue
-                else: errors.append("Total Revenue is zero for Operating Margin (yfinance).")
-            else: errors.append("Missing operating income/total revenue for Operating Margin (yfinance).")
+                # Fetch and process EPS growth
+                annual_earnings = stock.earnings
+                if annual_earnings is None or annual_earnings.empty:
+                    errors.append("Could not fetch annual earnings from yfinance or it's empty.")
+                else:
+                    annual_earnings.columns = pd.to_datetime(annual_earnings.columns)
+                    if 'Basic EPS' in annual_earnings.index and len(annual_earnings.columns) >= 4:
+                        eps = annual_earnings.loc['Basic EPS'].sort_index(ascending=True)
+                        data['eps_growth'] = calculate_cagr(eps.iloc[-4:])
+                    else: errors.append("Insufficient 'Basic EPS' data from yfinance for 3Y CAGR.")
 
-            if 'Operating Income' in annual_financials.index and 'Interest Expense' in annual_financials.index and not annual_financials.columns.empty:
-                operating_income = annual_financials.loc['Operating Income', annual_financials.columns[0]]
-                interest_expense = annual_financials.loc['Interest Expense', annual_financials.columns[0]]
-                if interest_expense != 0: data['interest_coverage_ratio'] = operating_income / interest_expense
-                else: data['interest_coverage_ratio'] = 1000.0 # Very high if no interest expense
-            else: errors.append("Missing operating income/interest expense for Interest Coverage Ratio (yfinance).")
-        else: errors.append("Could not fetch annual financials from yfinance.")
+                op_income_idx = 'Operating Income' if 'Operating Income' in annual_financials.index else ('Gross Profit' if 'Gross Profit' in annual_financials.index else None)
+                if op_income_idx and 'Total Revenue' in annual_financials.index and not annual_financials.columns.empty:
+                    op_income = annual_financials.loc[op_income_idx, annual_financials.columns[0]]
+                    total_revenue = annual_financials.loc['Total Revenue', annual_financials.columns[0]]
+                    if pd.notna(total_revenue) and total_revenue != 0: data['operating_margin'] = op_income / total_revenue
+                    else: errors.append("Total Revenue is zero or NaN for Operating Margin (yfinance).")
+                else: errors.append("Missing operating income/total revenue for Operating Margin (yfinance).")
 
-        annual_balance_sheet = stock.balance_sheet
-        if not annual_balance_sheet.empty and not annual_balance_sheet.columns.empty:
-            if 'Net Income' in annual_financials.index and 'Total Stockholder Equity' in annual_balance_sheet.index:
+                if 'Operating Income' in annual_financials.index and 'Interest Expense' in annual_financials.index and not annual_financials.columns.empty:
+                    operating_income = annual_financials.loc['Operating Income', annual_financials.columns[0]]
+                    interest_expense = annual_financials.loc['Interest Expense', annual_financials.columns[0]]
+                    if pd.notna(interest_expense) and interest_expense != 0: data['interest_coverage_ratio'] = operating_income / interest_expense
+                    else: data['interest_coverage_ratio'] = 1000.0 # Very high if no interest expense
+                else: errors.append("Missing operating income/interest expense for Interest Coverage Ratio (yfinance).")
+
+        else:
+            errors.append("Basic info not fetched, or financial currency missing, so financials cannot be fetched accurately from yfinance.")
+
+        annual_balance_sheet = stock.balance_sheet # This might also return None
+        if annual_balance_sheet is None or annual_balance_sheet.empty:
+            errors.append("Could not fetch balance sheet from yfinance or it's empty.")
+        else:
+            annual_balance_sheet.columns = pd.to_datetime(annual_balance_sheet.columns) # Ensure column index is date-like
+
+            if 'Net Income' in annual_financials.index and 'Total Stockholder Equity' in annual_balance_sheet.index and not annual_financials.columns.empty and not annual_balance_sheet.columns.empty:
                 net_income_latest = annual_financials.loc['Net Income', annual_financials.columns[0]]
                 total_equity_latest = annual_balance_sheet.loc['Total Stockholder Equity', annual_balance_sheet.columns[0]]
-                if total_equity_latest != 0: data['roe'] = net_income_latest / total_equity_latest
-                else: errors.append("Total Stockholder Equity is zero for ROE (yfinance).")
+                if pd.notna(total_equity_latest) and total_equity_latest != 0: data['roe'] = net_income_latest / total_equity_latest
+                else: errors.append("Total Stockholder Equity is zero or NaN for ROE (yfinance).")
             else: errors.append("Missing Net Income/Total Stockholder Equity for ROE (yfinance).")
 
-            if 'Total Debt' in annual_balance_sheet.index and 'Total Stockholder Equity' in annual_balance_sheet.index:
+            if 'Total Debt' in annual_balance_sheet.index and 'Total Stockholder Equity' in annual_balance_sheet.index and not annual_balance_sheet.columns.empty:
                 total_debt_latest = annual_balance_sheet.loc['Total Debt', annual_balance_sheet.columns[0]]
                 total_equity_latest = annual_balance_sheet.loc['Total Stockholder Equity', annual_balance_sheet.columns[0]]
-                if total_equity_latest != 0: data['debt_equity'] = total_debt_latest / total_equity_latest
-                else: errors.append("Total Stockholder Equity is zero for Debt/Equity (yfinance).")
+                if pd.notna(total_equity_latest) and total_equity_latest != 0: data['debt_equity'] = total_debt_latest / total_equity_latest
+                else: errors.append("Total Stockholder Equity is zero or NaN for Debt/Equity (yfinance).")
             else: errors.append("Missing Total Debt/Total Stockholder Equity for Debt/Equity (yfinance).")
-        else: errors.append("Could not fetch balance sheet from yfinance.")
-
+        
     except Exception as e:
-        errors.append(f"An error occurred while processing yfinance fundamentals for {ticker_symbol}: {e}. Defaults used.")
+        errors.append(f"An error occurred while processing yfinance financials/balance sheet for {ticker_symbol}: {e}. Defaults used.")
 
     try:
         hist = stock.history(period="1y", interval="1d")
-        if not hist.empty:
+        if hist is None or hist.empty:
+            errors.append("Could not fetch historical data from yfinance for technicals or it's empty.")
+        else:
             data['rsi'] = calculate_rsi(hist)
             data['ma_cross'] = get_ma_cross_status(hist)
             data['macd_signal'] = calculate_macd(hist)
             data['volume_trend'] = get_volume_trend(hist)
-        else: errors.append("Could not fetch historical data from yfinance for technicals.")
     except Exception as e:
         errors.append(f"An error occurred while processing yfinance historical data for {ticker_symbol}: {e}. Defaults used for technicals.")
 
     # --- Supplementing with other APIs (FMP, EODHD) ---
 
-    # FMP: P/E Ratio (vs Industry)
-    # This is complex as FMP's free industry PE API requires specific date and exact industry string,
-    # which can be inconsistent with yfinance's industry names.
-    # For now, we'll keep this as a default based on current_pe if available, otherwise '~ Industry Avg'.
-    if current_pe is not None:
-        # A hypothetical mapping or API call for industry average PE would go here.
-        # For a truly automated comparison, you'd need a robust industry mapping or
-        # an API that directly returns industry average PE for a given ticker's industry.
-        # As it's highly variable by industry and harder to auto-fetch accurately with free APIs,
-        # we'll keep it simple: assume if PE is low/high, it's relative to average.
-        if current_pe < 15: # Arbitrary threshold, requires real industry comparison
-            data['pe_vs_industry'] = 'Less than Industry Avg'
-        elif current_pe > 30: # Arbitrary threshold
-            data['pe_vs_industry'] = '> Industry Avg'
-        else:
-            data['pe_vs_industry'] = '~ Industry Avg'
-
     # FMP: Analyst Recommendations
     if FMP_API_KEY:
-        data['analyst_recommendations'] = fetch_fmp_analyst_recommendations(ticker_symbol)
+        analyst_rec = fetch_fmp_analyst_recommendations(ticker_symbol)
+        data['analyst_recommendations'] = analyst_rec
+        if analyst_rec == 'Hold':
+            errors.append("FMP Analyst Recommendations might be unavailable or defaulted (check API key/rate limits or data for ticker).")
     else:
         errors.append("FMP API Key not provided. Analyst Recommendations defaulted.")
 
     # FMP: Insider Trading
     if FMP_API_KEY:
-        data['insider_trading'] = fetch_fmp_insider_trading(ticker_symbol)
+        insider_trend = fetch_fmp_insider_trading(ticker_symbol)
+        data['insider_trading'] = insider_trend
+        if insider_trend == 'Net neutral':
+            errors.append("FMP Insider Trading might be unavailable or defaulted (check API key/rate limits or data for ticker).")
     else:
         errors.append("FMP API Key not provided. Insider Trading defaulted.")
 
     # EODHD: News Sentiment
     if EODHD_API_KEY:
-        data['news_sentiment'] = fetch_eodhd_news_sentiment(ticker_symbol)
+        news_sent = fetch_eodhd_news_sentiment(ticker_symbol)
+        data['news_sentiment'] = news_sent
+        if news_sent == 'Neutral':
+            errors.append("EODHD News Sentiment might be unavailable or defaulted (check API key/rate limits or data for ticker).")
     else:
         errors.append("EODHD API Key not provided. News Sentiment defaulted.")
-
 
     return data, errors
 
@@ -724,7 +759,22 @@ st.set_page_config(layout="centered", page_title="Stock Scoring Model (Auto-Fetc
 st.title("📈 Stock Scoring Model (Auto-Fetch)")
 st.markdown("Enter a stock ticker symbol, and the model will automatically fetch relevant data from Yahoo Finance and other sources to score the stock.")
 
-ticker_symbol = st.text_input("Enter Stock Ticker").upper()
+st.warning("⚠️ **Important Limitations & Manual Considerations:**")
+st.markdown("""
+-   **API Keys:** For full functionality, you need to obtain free API keys from **Financial Modeling Prep (FMP)** and **EOD Historical Data (EODHD)**.
+    * **Crucially, configure your `.streamlit/secrets.toml` file with `FMP-API-KEY` and `EODHD-API-KEY`. A `403 Forbidden` error often means the key is invalid or rate limits are hit.**
+-   **Qualitative Parameters (Defaulted):** The following parameters are **not** fetched by free APIs and are set to **neutral/average defaults**:
+    * Management Quality: Governance Rating, Promoter Holding Trend
+    * Moat & Competitiveness: Brand Value / Moat, Market Share Leadership
+    * Risk Factors (Non-Beta): Litigation/Political Risk
+    * *These require your qualitative judgment or more advanced (often paid) data sources.*
+-   **P/E Ratio vs Industry:** The model attempts a simplified comparison. For accurate industry-relative P/E, manual research of the industry average or a dedicated API for this purpose is recommended.
+-   **Data Availability:** Data from `yfinance` and other free APIs can be inconsistent or incomplete for some tickers. If a parameter cannot be fetched, its default value will be used, and a warning will be displayed.
+-   **Rate Limits:** Free APIs have strict rate limits. Frequent requests may lead to temporary blocking.
+""")
+
+
+ticker_symbol = st.text_input("Enter Stock Ticker (e.g., AAPL, MSFT, GOOG, TSLA)", value="AAPL").upper()
 calculate_button = st.button("Calculate Stock Score")
 
 # --- Display Results ---
@@ -739,8 +789,6 @@ if calculate_button and ticker_symbol:
         st.info("Parameters not fetched were defaulted. Consider reviewing them for accuracy.")
         st.write("---")
 
-    # Use the fetched_data directly as the input for calculation,
-    # as it already contains defaults for un-fetchable/missing data.
     result = calculate_stock_score(fetched_data)
 
     st.markdown("---")
@@ -758,7 +806,6 @@ if calculate_button and ticker_symbol:
             st.error(f"Recommendation: {result['recommendation']}")
 
     st.subheader("Category-wise Scores (out of 100)")
-    # Display category scores
     for category, score in result['category_scores'].items():
         st.info(f"**{category}:** {score:.2f}")
 
