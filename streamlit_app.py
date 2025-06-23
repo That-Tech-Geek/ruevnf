@@ -340,12 +340,12 @@ def calculate_stock_score(data):
         management_score * 0.10 +
         moat_score * 0.10 +
         risk_score * 0.10
-    )
+    ) 
 
     # Determine recommendation
     if total_score > 7.5:
         recommendation = '✅ BUY'
-    elif 5 <= total_score <= 7.5:
+    elif 5.0 <= total_score <= 7.5:
         recommendation = '🟡 HOLD'
     else:
         recommendation = '❌ SELL'
@@ -469,6 +469,8 @@ def fetch_fmp_industry_pe(industry_name, current_pe_value):
     # Example: https://financialmodelingprep.com/api/v4/industry_price_earning_ratio?date=YYYY-MM-DD&exchange=NYSE&apikey=YOUR_API_KEY
     # This requires dynamic date and accurate industry name mapping.
     # For now, we'll make a simplified assumption.
+    # User requested to add this line for reference:
+    # https://financialmodelingprep.com/api/v4/industry_price_earning_ratio?date=YYYY-MM-DD&exchange=NYSE&apikey=YOUR_API_KEY
     
     if current_pe_value is None:
         return '~ Industry Avg' # Cannot determine without current PE
