@@ -331,17 +331,8 @@ def calculate_stock_score(data):
         risk_score * 0.10
     )
 
-    # Determine recommendation
-    if total_score > 75:
-        recommendation = '✅ BUY'
-    elif 50 <= total_score <= 75:
-        recommendation = '🟡 HOLD'
-    else:
-        recommendation = '❌ SELL'
-
     return {
         'total_score': total_score,
-        'recommendation': recommendation,
         'category_scores': {
             'Fundamentals': fundamentals_score * 10, # Display 0-100 for categories as well
             'Valuation': valuation_score * 10,
@@ -476,7 +467,7 @@ def fetch_and_process_stock_data(ticker_symbol):
         'dividend_yield': 0.0,
         'insider_trading': 'Net neutral', # Qualitative, default
         'news_sentiment': 'Neutral', # Qualitative, default
-        'analyst_recommendations': 'Hold', # Qualitative, default
+        'analyst_s': 'Hold', # Qualitative, default
         'rsi': 50, # Default neutral RSI
         'ma_cross': 'Flat', # Default neutral MA cross
         'macd_signal': 'Neutral', # Default neutral MACD
@@ -611,7 +602,7 @@ st.markdown("""
 
 st.warning("⚠️ **Important Limitations:**")
 st.markdown("""
-- **Qualitative parameters** (e.g., Insider Trading, News Sentiment, Analyst Recommendations, Management Quality, Moat/Competitiveness, Litigation/Political Risk) cannot be reliably fetched from `yfinance` and are set to **neutral/average defaults**.
+- **Qualitative parameters** (e.g., Insider Trading, News Sentiment, Analyst s, Management Quality, Moat/Competitiveness, Litigation/Political Risk) cannot be reliably fetched from `yfinance` and are set to **neutral/average defaults**.
 - **P/E Ratio vs Industry** is also defaulted to 'Industry Avg' as `yfinance` does not provide direct industry comparisons. You may need external research for this.
 - Data availability varies for different tickers. If data is missing from `yfinance`, default values will be used for those specific parameters.
 """)
@@ -636,7 +627,7 @@ if calculate_button and ticker_symbol:
     result = calculate_stock_score(fetched_data)
 
     st.markdown("---")
-    st.header(f"📊 Stock Score & Recommendation for {ticker_symbol}")
+    st.header(f"📊 Stock Score for {ticker_symbol}")
 
     col_score, col_rec = st.columns(2)
     with col_score:
